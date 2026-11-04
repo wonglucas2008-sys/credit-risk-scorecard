@@ -2,11 +2,11 @@
 Predicting loan default and translating predictions into a cost-aware approval decision that maximises expected profit.
 
 ## Key Result
-At the cost-optimised threshold (0.14), the calibrated LightGBM model generates approximately **$554 profit per applicant**, about **$3.67M more than an approve-all baseline** on the validation set.
+At a cost-optimised cutoff of 0.16 (chosen on one half of the held-out test set; theoretical break-even 0.143), the calibrated, gender-free LightGBM earns about **$548 profit per applicant** on the other, untouched half. That is about **$113 per applicant more than approving everyone ($435)**, with an 87.2% approval rate. Profit figures rest on assumed flat costs (see Limitations).
 
 ## Business Question
-Can we predict whether a loan applicant will default, and use that 
-prediction to make a cost-aware approval decision that maximises 
+Can we predict whether a loan applicant will default, and use that
+prediction to make a cost-aware approval decision that maximises
 expected profit while managing bad-debt risk?
 
 ## Dataset
@@ -16,39 +16,61 @@ https://www.kaggle.com/c/home-credit-default-risk/data
 Place files in the `/data` folder.
 
 ## Approach (CRISP-DM)
-1. **Business Understanding** — Define default, approval threshold, 
-   and cost matrix (false negative vs false positive cost)
-2. **Data Understanding** — Explore application, bureau, and 
-   previous loan tables
-3. **Data Preparation** — Join tables, engineer domain-aware features, 
-   handle class imbalance
-4. **Modelling** — Build both a WOE/logistic scorecard and a 
-   LightGBM model, compare performance
-5. **Evaluation** — KS, Gini, calibration with isotonic fix, cost-based threshold, fairness analysis
-6. **Deployment** — Streamlit app for interactive scoring (planned)
+0. **Business Understanding** — Define default, approval threshold, and cost matrix
+1. **Data Understanding** — Explore application, bureau, and previous loan tables
+2. **Data Preparation** — Join tables, engineer domain-aware features, flag the
+   DAYS_EMPLOYED anomaly. Missing numeric values are imputed after the train/test
+   split, using training medians only
+3. **Modelling** — A WOE/logistic scorecard (12 features, IV > 0.02) and a LightGBM
+   model, compared like for like
+4. **Evaluation** — KS, Gini, isotonic calibration, cost-based threshold chosen and
+   reported on separate data, fairness analysis
+5. **Deployment** — Streamlit dashboard for scoring applicants and testing cost assumptions
 
-## Models Compared
+## Models Compared (held-out test set, 61,503 applicants)
 
-| Metric | WOE Scorecard | LightGBM |
-|--------|--------------|----------|
-| AUC | 0.7391 | 0.7712 |
-| KS Statistic | 0.3558 | 0.4025 |
-| Gini | 0.4783 | 0.5424 |
+| Metric | WOE Scorecard | LightGBM (no gender) |
+|--------|--------------|----------------------|
+| Features | 12 | 272 |
+| AUC | 0.7345 | 0.7679 |
+| KS Statistic | 0.3506 | 0.4026 |
+| Gini | 0.4691 | 0.5357 |
 | Interpretability | High | Low |
-| Calibrated | Yes (linear) | After isotonic fix |
+| Calibrated | Yes (logistic) | After isotonic fix |
 
-## Key Differentiators
-- WOE scorecard alongside gradient boosting (interpretability vs performance)
-- Probability calibration check
-- Cost-sensitive approval threshold, translating model output into a business decision with expected profit per 1,000 applicants
+### Is the comparison fair?
+The scorecard uses 12 features and LightGBM uses many more, so I added a controlled comparison (test AUC):
+
+| Model | Features | AUC |
+|-------|----------|-----|
+| WOE scorecard + logistic regression | 12 | 0.7345 |
+| LightGBM | same 12 | 0.7490 |
+| LightGBM (with gender, for reference) | 275 | 0.7700 |
+
+Of the 0.0355 AUC gap between the scorecard and LightGBM with all features, about 0.0145 comes from the model class and about 0.0210 from the extra features. The scorecard is closer to LightGBM than the headline comparison suggests. All figures come from a single random split.
 
 ## Key Findings
-- LightGBM outperforms the scorecard on all ranking metrics, but the scorecard offers superior interpretability for regulatory needs
-- Raw LightGBM probabilities were poorly calibrated due to class weighting; isotonic regression corrected this
-- External credit bureau scores (EXT_SOURCE) are the strongest predictors
-- Gender appeared as a predictor; removing it cost only 0.0010 AUC, so it should be removed for fair-lending compliance
+- LightGBM outperforms the scorecard on all ranking metrics, but more than half of the gap comes from having more features; the scorecard offers superior interpretability for regulatory needs
+- LightGBM is trained with class weights, so raw scores are not true probabilities; isotonic regression fitted on a validation set maps them to calibrated probabilities
+- External credit bureau scores (EXT_SOURCE) are the strongest predictors in both models
+- Gender appeared as a predictor in LightGBM; removing it cost about 0.002 AUC (0.7700 to 0.7679), so it is excluded from the deployed model for fair-lending compliance
+- Information Value must be computed on binned data: `sc.iv()` treats every unique value as its own group and inflates IV for continuous features
+
+## Methodology Notes
+- Stratified 80/20 train/test split (`random_state=42`); train is split again 80/20 into train and validation. Validation is used only for LightGBM early stopping and for fitting the calibrator
+- The test set is split in half: half A chooses the approval threshold, half B reports profit
+- Scorecard features: IV > 0.02 computed from `woebin` bins, with the duplicate DAYS_BIRTH dropped in favour of AGE_YEARS
+
+## Run the dashboard
+```
+pip install streamlit plotly joblib lightgbm scikit-learn pandas
+python -m streamlit run 06_dashboard.py
+```
+The first launch trains the model (a few minutes) and caches it in `models/`.
 
 ## Limitations
-- Median imputation used for high-missingness columns
-- Random rather than time-based train/test split
-- Fairness addressed only by removing the explicit attribute; proxy discrimination not yet tested
+- **Assumed costs.** +$1,000 per good loan and -$6,000 per bad loan come from an assumed $10,000 loan, 10% margin and 60% loss given default, not from the data
+- **Flat loan size.** Every loan is treated as the same size
+- **Reject inference.** Only approved loans have known outcomes, so the model is trained on a filtered population
+- **Random split.** No out-of-time validation; results come from a single split and seed
+- **Fairness.** Removing the explicit attribute does not rule out proxy discrimination
