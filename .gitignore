@@ -25,3 +25,5 @@ venv/
 .DS_Store
 
 data/processed/
+data/processed/
+models/
